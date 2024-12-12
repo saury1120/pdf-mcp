@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pdf_reader"
+version = "0.1.0"
+description = "MCP server for reading PDF files"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp",
+    "PyMuPDF",      # PDF处理
+    "Pillow",       # 图像处理
+    "nltk",         # 自然语言处理
+    "spacy",        # NLP分析
+    "pdfminer.six", # PDF文本提取增强
+    "pandas",       # 表格数据处理
+    "tabula-py",    # PDF表格提取
+    "scikit-learn", # 机器学习支持
+    "langdetect",   # 语言检测
+    "transformers", # 文本分析和分类
+    "torch",        # PyTorch支持
+    "sentence-transformers", # 文本相似度
+]
+
+[project.scripts]
+pdf_reader = "pdf_reader:main"

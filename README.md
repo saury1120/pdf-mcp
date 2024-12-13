@@ -37,7 +37,12 @@ uv pip install -e .
 ```
 
 3. 配置 Claude Desktop：
-编辑 `~/Library/Application Support/Claude/claude_desktop_config.json`：
+编辑 Claude Desktop 的配置文件：
+
+- MacOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%AppData%/Claude/claude_desktop_config.json`
+
+添加以下配置（注意替换 `/path/to/pdf-mcp` 为实际的项目路径）：
 ```json
 {
     "mcpServers": {
@@ -45,7 +50,7 @@ uv pip install -e .
             "command": "uv",
             "args": [
                 "--directory",
-                "/path/to/pdf-mcp",
+                "/path/to/pdf-mcp",  # 替换为 pdf-mcp 项目的完整路径
                 "run",
                 "pdf_reader"
             ]

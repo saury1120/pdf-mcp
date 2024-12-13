@@ -24,7 +24,7 @@
 
 1. 克隆仓库：
 ```bash
-git clone https://github.com/[your-username]/pdf-mcp.git
+git clone https://github.com/saury1120/pdf-mcp.git
 cd pdf-mcp
 ```
 

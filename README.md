@@ -99,8 +99,7 @@ A high-performance PDF document processing service supporting text, image, table
 
 ```
 ### Claude Desktop 
-
-```json
+json
 {
     "mcpServers": {
         "pdf_reader": {

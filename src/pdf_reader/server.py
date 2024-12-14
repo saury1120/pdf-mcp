@@ -21,26 +21,90 @@ from sentence_transformers import SentenceTransformer
 import torch
 import numpy as np
 from collections import defaultdict
+import threading
+from functools import lru_cache
+import concurrent.futures
+
+# 全局变量
+nlp = None
+classifier = None
+sentence_model = None
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+def load_model_in_thread(model_name: str):
+    """在单独的线程中加载模型"""
+    global nlp, classifier, sentence_model
+    
+    if model_name == 'spacy':
+        try:
+            return spacy.load('en_core_web_sm')
+        except OSError:
+            spacy.cli.download('en_core_web_sm')
+            return spacy.load('en_core_web_sm')
+    elif model_name == 'classifier':
+        return pipeline("zero-shot-classification", 
+                      device='cuda' if torch.cuda.is_available() else 'cpu',
+                      model='facebook/bart-large-mnli')  # 使用更小的模型
+    elif model_name == 'sentence_transformer':
+        return SentenceTransformer('paraphrase-MiniLM-L6-v2')
+
+def initialize_dependencies():
+    """异步初始化所需的依赖和模型"""
+    global nlp, classifier, sentence_model
+    
+    try:
+        # NLTK数据 - 使用异步方式下载
+        nltk_resources = ['punkt', 'averaged_perceptron_tagger', 'maxent_ne_chunker', 'words', 'stopwords']
+        for resource in nltk_resources:
+            try:
+                nltk.data.find(f'tokenizers/{resource}')
+            except LookupError:
+                nltk.download(resource, quiet=True)
+        
+        # 使用线程池并行加载模型
+        future_spacy = executor.submit(load_model_in_thread, 'spacy')
+        future_classifier = executor.submit(load_model_in_thread, 'classifier')
+        future_sentence = executor.submit(load_model_in_thread, 'sentence_transformer')
+        
+        # 等待所有模型加载完成
+        nlp = future_spacy.result()
+        classifier = future_classifier.result()
+        sentence_model = future_sentence.result()
+        
+        print("模型加载完成")
+        print(f"GPU加速: {'可用' if torch.cuda.is_available() else '不可用'}")
+        
+        return True
+    except Exception as e:
+        print(f"初始化失败: {str(e)}")
+        return False
+
+# 使用缓存装饰器优化文本处理
+@lru_cache(maxsize=100)
+def process_text(text: str) -> str:
+    """处理文本并缓存结果"""
+    doc = nlp(text)
+    return " ".join([token.text for token in doc])
+
+# 优化图片处理
+def optimize_image(image: Image.Image, max_size: int = 1024) -> Image.Image:
+    """优化图片大小和质量"""
+    if max(image.size) > max_size:
+        ratio = max_size / max(image.size)
+        new_size = tuple(int(dim * ratio) for dim in image.size)
+        image = image.resize(new_size, Image.Resampling.LANCZOS)
+    return image
+
+# 服务器初始化
+server = Server("pdf_reader")
 
 # 下载必要的NLTK数据
-nltk.download('punkt')
-nltk.download('averaged_perceptron_tagger')
-nltk.download('maxent_ne_chunker')
-nltk.download('words')
-nltk.download('stopwords')
-
-# 加载spaCy模型
-try:
-    nlp = spacy.load('en_core_web_sm')
-except OSError:
-    spacy.cli.download('en_core_web_sm')
-    nlp = spacy.load('en_core_web_sm')
-
-# 加载预训练模型
-classifier = pipeline("zero-shot-classification")
-sentence_model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
-
-server = Server("pdf_reader")
+nltk_resources = ['punkt', 'averaged_perceptron_tagger', 'maxent_ne_chunker', 'words', 'stopwords']
+for resource in nltk_resources:
+    try:
+        nltk.data.find(f'tokenizers/{resource}')
+    except LookupError:
+        nltk.download(resource, quiet=True)
 
 @server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
@@ -200,7 +264,7 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
     ]
 
-def extract_text_from_pdf(file_path: str, page_number: int = None) -> str:
+async def extract_text_from_pdf(file_path: str, page_number: int = None) -> str:
     """从PDF中提取文本"""
     try:
         doc = fitz.open(file_path)
@@ -222,37 +286,51 @@ def extract_text_from_pdf(file_path: str, page_number: int = None) -> str:
     except Exception as e:
         return f"提取文本时出错: {str(e)}"
 
-def extract_images_from_pdf(file_path: str, page_number: int = None) -> List[str]:
+async def extract_images_from_pdf(file_path: str, page_number: int = None):
     """从PDF中提取图片，返回base64编码的图片列表"""
     try:
         doc = fitz.open(file_path)
         images = []
+        pages = [page_number] if page_number is not None else range(len(doc))
         
-        pages = [doc[page_number]] if page_number is not None else doc
-        
-        for page in pages:
+        for page_num in pages:
+            page = doc[page_num]
             image_list = page.get_images()
             
-            for img_index, img in enumerate(image_list):
-                xref = img[0]
-                base_image = doc.extract_image(xref)
-                image_bytes = base_image["image"]
-                
-                # 将图片转换为PIL Image对象
-                image = Image.open(io.BytesIO(image_bytes))
-                
-                # 将图片转换为base64
-                buffered = io.BytesIO()
-                image.save(buffered, format="PNG")
-                img_str = base64.b64encode(buffered.getvalue()).decode()
-                images.append(img_str)
+            # 并行处理图片
+            def process_image(img_index):
+                try:
+                    xref = image_list[img_index][0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    
+                    # 转换和优化图片
+                    image = Image.open(io.BytesIO(image_bytes))
+                    image = optimize_image(image)
+                    
+                    # 转换为base64
+                    buffered = io.BytesIO()
+                    image.save(buffered, format="PNG", optimize=True)
+                    img_str = base64.b64encode(buffered.getvalue()).decode()
+                    return img_str
+                except Exception as e:
+                    print(f"处理图片时出错: {str(e)}")
+                    return None
+            
+            # 使用线程池并行处理图片
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                futures = [executor.submit(process_image, i) for i in range(len(image_list))]
+                for future in concurrent.futures.as_completed(futures):
+                    if future.result():
+                        images.append(future.result())
         
         doc.close()
         return images
     except Exception as e:
-        return [f"提取图片时出错: {str(e)}"]
+        print(f"提取图片时出错: {str(e)}")
+        return []
 
-def extract_tables_from_pdf(file_path: str, page_number: int = None) -> List[str]:
+async def extract_tables_from_pdf(file_path: str, page_number: int = None) -> List[str]:
     """从PDF中提取表格"""
     try:
         if page_number is not None:
@@ -270,7 +348,7 @@ def extract_tables_from_pdf(file_path: str, page_number: int = None) -> List[str
     except Exception as e:
         return [f"提取表格时出错: {str(e)}"]
 
-def analyze_pdf_content(file_path: str, analysis_type: str) -> Dict[str, Any]:
+async def analyze_pdf_content(file_path: str, analysis_type: str) -> Dict[str, Any]:
     """分析PDF内容"""
     try:
         # 使用pdfminer提取文本，可以处理更复杂的PDF布局
@@ -307,7 +385,7 @@ def analyze_pdf_content(file_path: str, analysis_type: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": str(e)}
 
-def get_pdf_metadata(file_path: str) -> Dict[str, Any]:
+async def get_pdf_metadata(file_path: str) -> Dict[str, Any]:
     """获取PDF元数据"""
     try:
         doc = fitz.open(file_path)
@@ -327,7 +405,7 @@ def get_pdf_metadata(file_path: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": str(e)}
 
-def classify_document(file_path: str, categories: List[str]) -> Dict[str, float]:
+async def classify_document(file_path: str, categories: List[str]) -> Dict[str, float]:
     """对文档进行分类"""
     try:
         text = pdfminer_extract_text(file_path)
@@ -339,7 +417,7 @@ def classify_document(file_path: str, categories: List[str]) -> Dict[str, float]
     except Exception as e:
         return {"error": str(e)}
 
-def calculate_similarity(file_path1: str, file_path2: str) -> Dict[str, Any]:
+async def calculate_similarity(file_path1: str, file_path2: str) -> Dict[str, Any]:
     """计算两个文档的相似度"""
     try:
         text1 = pdfminer_extract_text(file_path1)
@@ -359,7 +437,7 @@ def calculate_similarity(file_path1: str, file_path2: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": str(e)}
 
-def detect_languages(file_path: str) -> Dict[str, Any]:
+async def detect_languages(file_path: str) -> Dict[str, Any]:
     """检测文档中的语言"""
     try:
         text = pdfminer_extract_text(file_path)
@@ -392,7 +470,7 @@ def detect_languages(file_path: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": str(e)}
 
-def advanced_text_analysis(file_path: str) -> Dict[str, Any]:
+async def advanced_text_analysis(file_path: str) -> Dict[str, Any]:
     """执行高级文本分析"""
     try:
         text = pdfminer_extract_text(file_path)
@@ -453,12 +531,12 @@ async def handle_call_tool(
 
     if name == "extract-text":
         page_number = arguments.get("page_number")
-        text = extract_text_from_pdf(file_path, page_number)
+        text = await extract_text_from_pdf(file_path, page_number)
         return [types.TextContent(type="text", text=text)]
     
     elif name == "extract-images":
         page_number = arguments.get("page_number")
-        images = extract_images_from_pdf(file_path, page_number)
+        images = await extract_images_from_pdf(file_path, page_number)
         result = []
         for i, img_base64 in enumerate(images):
             if img_base64.startswith("提取图片时出错"):
@@ -473,7 +551,7 @@ async def handle_call_tool(
     
     elif name == "extract-tables":
         page_number = arguments.get("page_number")
-        tables = extract_tables_from_pdf(file_path, page_number)
+        tables = await extract_tables_from_pdf(file_path, page_number)
         return [types.TextContent(type="text", text="\n".join(tables))]
     
     elif name == "analyze-content":
@@ -481,7 +559,7 @@ async def handle_call_tool(
         if not analysis_type:
             raise ValueError("缺少分析类型")
         
-        result = analyze_pdf_content(file_path, analysis_type)
+        result = await analyze_pdf_content(file_path, analysis_type)
         if "error" in result:
             return [types.TextContent(type="text", text=f"分析出错: {result['error']}")]
         
@@ -497,7 +575,7 @@ async def handle_call_tool(
         return [types.TextContent(type="text", text=text)]
     
     elif name == "get-metadata":
-        metadata = get_pdf_metadata(file_path)
+        metadata = await get_pdf_metadata(file_path)
         if "error" in metadata:
             return [types.TextContent(type="text", text=f"获取元数据出错: {metadata['error']}")]
         
@@ -512,7 +590,7 @@ async def handle_call_tool(
         if not categories:
             raise ValueError("缺少分类类别")
         
-        result = classify_document(file_path, categories)
+        result = await classify_document(file_path, categories)
         if "error" in result:
             return [types.TextContent(type="text", text=f"分类出错: {result['error']}")]
         
@@ -527,7 +605,7 @@ async def handle_call_tool(
         if not file_path2:
             raise ValueError("缺少第二个文件路径")
         
-        result = calculate_similarity(file_path, file_path2)
+        result = await calculate_similarity(file_path, file_path2)
         if "error" in result:
             return [types.TextContent(type="text", text=f"计算相似度出错: {result['error']}")]
         
@@ -537,7 +615,7 @@ async def handle_call_tool(
         return [types.TextContent(type="text", text=text)]
     
     elif name == "detect-languages":
-        result = detect_languages(file_path)
+        result = await detect_languages(file_path)
         if "error" in result:
             return [types.TextContent(type="text", text=f"语言检测出错: {result['error']}")]
         
@@ -549,7 +627,7 @@ async def handle_call_tool(
         return [types.TextContent(type="text", text=text)]
     
     elif name == "advanced-analysis":
-        result = advanced_text_analysis(file_path)
+        result = await advanced_text_analysis(file_path)
         if "error" in result:
             return [types.TextContent(type="text", text=f"分析出错: {result['error']}")]
         
@@ -580,19 +658,31 @@ async def handle_call_tool(
 
 async def main():
     """运行服务器"""
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            InitializationOptions(
-                server_name="pdf_reader",
-                server_version="0.1.0",
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
+    try:
+        print("PDF Reader MCP 服务启动中...")
+        
+        # 在后台线程中初始化依赖
+        init_thread = threading.Thread(target=initialize_dependencies)
+        init_thread.start()
+        
+        # 启动服务器
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="pdf_reader",
+                    server_version="0.1.0",
+                    capabilities=server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={},
+                    ),
                 ),
-            ),
-        )
+            )
+    except Exception as e:
+        print(f"服务器运行错误: {str(e)}")
+        raise
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # 设置torch使用的线程数
+    torch.set_num_threads(4)

@@ -98,7 +98,7 @@ uv pip install -r requirements.txt
 uv pip install -e .
 
 # 4. 启动服务
-python -m src.pdf_reader
+uv run pdf_reader
 ```
 
 ### 方法二：从源码安装
@@ -138,9 +138,13 @@ CACHE_TTL=3600        # 缓存过期时间（秒）
 {
     "mcpServers": {
         "pdf_reader": {
-            "command": "python",
-            "args": ["-m", "src.pdf_reader"],
-            "cwd": "/path/to/pdf-mcp"
+            "command": "uv",
+            "args": [
+                "--directory",
+                "/path/to/pdf-mcp",  # 替换为实际路径
+                "run",
+                "pdf_reader"
+            ]
         }
     }
 }

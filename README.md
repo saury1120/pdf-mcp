@@ -36,7 +36,27 @@
 3. ▶️ 启动服务：
    ```bash
    uv run pdf_reader
-   ```
+
+   
+### Claude Desktop 配置
+1. 找到配置文件：
+   - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+   - Windows: `%AppData%/Claude/claude_desktop_config.json`
+2. 添加以下配置：
+```json
+{
+    "mcpServers": {
+        "pdf_reader": {
+            "command": "uv",
+            "args": [
+                "--directory",
+                "/path/to/pdf-mcp",  # 替换为实际路径
+                "run",
+                "pdf_reader"
+            ]
+        }
+    }
+}   ```
 
 
 # PDF-MCP Service
@@ -73,7 +93,25 @@ A high-performance PDF document processing service supporting text, image, table
 3. ▶️ Start the service:
    ```bash
    uv run pdf_reader
-   ```
+
+```
+### Claude Desktop 
+
+```json
+{
+    "mcpServers": {
+        "pdf_reader": {
+            "command": "uv",
+            "args": [
+                "--directory",
+                "/path/to/pdf-mcp",  # 替换为实际路径
+                "run",
+                "pdf_reader"
+            ]
+        }
+    }
+}
+
 
 ## 📄 License
 

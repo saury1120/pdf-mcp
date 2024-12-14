@@ -41,6 +41,27 @@
   - 关键信息提取
   - 文档结构解析
 
+### 🔋 性能优化
+- **智能模型管理**
+  - 延迟加载机制，按需加载模型
+  - 自动内存管理，防止内存溢出
+  - 智能模型卸载，优化资源使用
+
+- **高效缓存**
+  - LRU 缓存机制
+  - 分布式缓存支持
+  - 智能缓存清理
+
+- **并行处理**
+  - 异步 IO 操作
+  - 多线程文档处理
+  - 批处理优化
+
+- **资源优化**
+  - 自适应设备选择（CPU/GPU）
+  - 智能量化配置
+  - 动态线程管理
+
 ## 💻 系统要求
 
 ### 硬件要求
@@ -75,6 +96,9 @@ source .venv/bin/activate  # Linux/macOS
 # 3. 安装依赖
 uv pip install -r requirements.txt
 uv pip install -e .
+
+# 4. 启动服务
+python -m src.pdf_reader
 ```
 
 ### 方法二：从源码安装
@@ -89,6 +113,21 @@ pip install dist/*.whl
 
 ## ⚙️ 配置说明
 
+### 环境变量配置
+```bash
+# GPU 配置
+CUDA_VISIBLE_DEVICES=0  # 指定使用的 GPU
+TORCH_THREADS=4         # PyTorch 线程数
+
+# 内存管理
+MEMORY_THRESHOLD=0.8    # 内存使用阈值（0-1）
+MAX_IDLE_TIME=300      # 模型最大空闲时间（秒）
+
+# 缓存配置
+CACHE_SIZE=1000        # LRU 缓存大小
+CACHE_TTL=3600        # 缓存过期时间（秒）
+```
+
 ### Claude Desktop 配置
 1. 找到配置文件：
    - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -99,136 +138,51 @@ pip install dist/*.whl
 {
     "mcpServers": {
         "pdf_reader": {
-            "command": "uv",
-            "args": [
-                "--directory",
-                "/path/to/pdf-mcp",  # 替换为实际路径
-                "run",
-                "pdf_reader"
-            ]
+            "command": "python",
+            "args": ["-m", "src.pdf_reader"],
+            "cwd": "/path/to/pdf-mcp"
         }
     }
 }
 ```
 
-## 📖 使用指南
+## 📚 API 文档
 
 ### 基础功能
-1. **文本提取**
-```bash
-请读取 [PDF文件路径] 的内容
+```python
+# 文本提取
+extract_text(file_path: str, page_number: Optional[int] = None) -> str
+
+# 图片提取
+extract_images(file_path: str, page_number: Optional[int] = None) -> List[str]
+
+# 表格提取
+extract_tables(file_path: str, page_number: Optional[int] = None) -> List[pd.DataFrame]
 ```
 
-2. **图片提取**
-```bash
-请提取 [PDF文件路径] 中的图片
+### 高级分析
+```python
+# 文档分类
+classify_document(file_path: str, categories: List[str]) -> Dict[str, float]
+
+# 相似度计算
+calculate_similarity(file_path1: str, file_path2: str) -> float
+
+# 语言检测
+detect_languages(file_path: str) -> Dict[str, float]
+
+# 高级分析
+analyze_content(file_path: str, analysis_type: str) -> Dict[str, Any]
 ```
-
-3. **表格提取**
-```bash
-请提取 [PDF文件路径] 中的表格数据
-```
-
-### 高级功能
-1. **文档分类**
-```bash
-请对 [PDF文件路径] 进行分类，可能的类别包括：
-- 技术文档
-- 学术论文
-- 新闻报道
-- 商业报告
-```
-
-2. **相似度比较**
-```bash
-请比较 [PDF文件1] 和 [PDF文件2] 的相似度
-```
-
-3. **语言检测**
-```bash
-请检测 [PDF文件路径] 中使用的语言
-```
-
-## 🔧 性能优化
-
-### CPU 优化
-- 多线程并行处理
-- 智能任务调度
-- 内存使用优化
-
-### GPU 加速
-- 支持 CUDA 加速
-- 自动检测 GPU 可用性
-- 动态负载均衡
-
-## ⚠️ 注意事项
-
-- 首次运行时会自动下载必要的模型文件（约 1GB）
-- 处理大型 PDF 文件时请确保足够的内存空间
-- 建议使用完整路径指定 PDF 文件
-- 启用 GPU 加速可显著提升性能
-
-## 🔍 故障排除
-
-### 常见问题解决
-
-1. **模型下载失败**
-```bash
-# 手动下载 spaCy 模型
-python -m spacy download en_core_web_sm
-```
-
-2. **GPU 相关错误**
-```bash
-# 重新安装对应版本的 PyTorch
-pip uninstall torch
-pip install torch --index-url https://download.pytorch.org/whl/cu118
-```
-
-3. **表格提取失败**
-```bash
-# 安装 Java 运行环境
-## macOS
-brew install java
-
-## Ubuntu
-sudo apt-get install default-jre
-
-## Windows
-# 访问 https://www.java.com 下载安装 JRE
-```
-
-## 📈 性能指标
-
-- 文本提取速度：~2MB/s
-- 图片提取速度：~10张/s
-- 表格识别准确率：>95%
-- GPU 加速后性能提升：2-5倍
-
-## 📄 许可证
-
-本项目采用 MIT 许可证，详见 [LICENSE](LICENSE) 文件。
 
 ## 🤝 贡献指南
 
-欢迎提交 Issue 和 Pull Request！在提交之前，请：
+1. Fork 项目
+2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
+3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
+4. 推送到分支 (`git push origin feature/AmazingFeature`)
+5. 开启 Pull Request
 
-1. 查看现有的 Issue 和 Pull Request
-2. 遵循项目的代码规范
-3. 编写必要的测试用例
-4. 更新相关文档
+## 📄 开源协议
 
-## 📧 联系方式
-
-如有问题或建议，请通过以下方式联系：
-
-- Issue: [GitHub Issues](https://github.com/saury1120/pdf-mcp/issues)
-
-## 🙏 致谢
-
-感谢以下开源项目的支持：
-
-- PyMuPDF
-- Transformers
-- spaCy
-- NLTK
+本项目采用 MIT 协议 - 详见 [LICENSE](LICENSE) 文件

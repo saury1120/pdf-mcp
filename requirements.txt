@@ -1,6 +1,6 @@
 mcp>=0.1.0
 PyMuPDF>=1.23.8
-Pillow-SIMD>=10.1.0  # 替换 Pillow 为更快的 SIMD 版本
+Pillow>=10.1.0  # 使用标准 Pillow 包
 nltk>=3.8.1
 spacy>=3.7.2
 pdfminer.six>=20221105
@@ -15,3 +15,4 @@ en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_
 # 新增性能优化相关的包
 ujson>=5.9.0  # 更快的JSON处理
 pyarrow>=14.0.2  # 更快的数据处理
+psutil>=5.9.7  # 系统资源监控

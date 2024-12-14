@@ -24,76 +24,340 @@ from collections import defaultdict
 import threading
 from functools import lru_cache
 import concurrent.futures
+import time
+import psutil
 
-# 全局变量
-nlp = None
-classifier = None
-sentence_model = None
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+class ModelManager:
+    _instance = None
+    _models = {}
+    _lock = threading.Lock()
+    _last_used = {}
+    _memory_threshold = 0.8  # 内存使用率阈值
+    _max_idle_time = 300  # 模型最大空闲时间（秒）
 
-def load_model_in_thread(model_name: str):
-    """在单独的线程中加载模型"""
-    global nlp, classifier, sentence_model
-    
-    if model_name == 'spacy':
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __init__(self):
+        if hasattr(self, '_initialized'):
+            return
+        self._initialized = True
+        self._model_configs = {
+            'spacy': {
+                'name': 'en_core_web_sm',
+                'loader': self._load_spacy,
+                'quantize': False
+            },
+            'classifier': {
+                'name': 'facebook/bart-large-mnli',
+                'loader': self._load_classifier,
+                'quantize': {
+                    'enabled': True,
+                    'method': 'dynamic',
+                    'dtype': torch.qint8,
+                    'layers': [torch.nn.Linear, torch.nn.Conv1d, torch.nn.Conv2d],
+                    'calibration_size': 100
+                }
+            },
+            'sentence_transformer': {
+                'name': 'paraphrase-MiniLM-L6-v2',
+                'loader': self._load_sentence_transformer,
+                'quantize': {
+                    'enabled': True,
+                    'method': 'dynamic',
+                    'dtype': torch.qint8,
+                    'layers': [torch.nn.Linear],
+                    'calibration_size': 100
+                }
+            }
+        }
+        self.device = self._get_optimal_device()
+        self._setup_quantization_backend()
+        self._cleanup_thread = threading.Thread(target=self._cleanup_models, daemon=True)
+        self._cleanup_thread.start()
+
+    def _get_optimal_device(self):
+        """根据系统配置选择最优设备"""
+        if not torch.cuda.is_available():
+            return 'cpu'
+        
+        # 检查GPU内存
+        gpu_memory = torch.cuda.get_device_properties(0).total_memory
+        if gpu_memory < 4 * 1024 * 1024 * 1024:  # 小于4GB
+            return 'cpu'
+        
+        return 'cuda'
+
+    def _get_optimal_quantization_config(self, model_type):
+        """根据设备和模型类型选择最优量化配置"""
+        base_config = self._model_configs[model_type]['quantize']
+        if not base_config:
+            return base_config
+
+        if self.device == 'cpu':
+            return {
+                'enabled': True,
+                'method': 'dynamic',
+                'dtype': torch.qint8,
+                'layers': base_config['layers'],
+                'calibration_size': 50  # CPU下使用更小的校准集
+            }
+        else:
+            return {
+                'enabled': True,
+                'method': 'static',
+                'dtype': torch.float16,  # GPU下使用半精度
+                'layers': base_config['layers'],
+                'calibration_size': base_config['calibration_size']
+            }
+
+    def get_model(self, model_type: str):
+        """延迟加载模型"""
+        with self._lock:
+            if model_type not in self._models:
+                config = self._model_configs.get(model_type)
+                if not config:
+                    raise ModelLoadError(f"Unknown model type: {model_type}")
+                
+                # 检查内存使用情况
+                self._check_memory_usage()
+                
+                # 加载模型
+                try:
+                    model = config['loader'](config['name'])
+                    quant_config = self._get_optimal_quantization_config(model_type)
+                    if quant_config and quant_config['enabled']:
+                        model = self._prepare_model_for_quantization(model, quant_config)
+                    self._models[model_type] = model
+                except Exception as e:
+                    raise ModelLoadError(f"Failed to load model {model_type}: {str(e)}")
+            
+            # 更新最后使用时间
+            self._last_used[model_type] = time.time()
+            return self._models[model_type]
+
+    def _check_memory_usage(self):
+        """检查内存使用情况并在必要时卸载模型"""
+        memory_percent = psutil.virtual_memory().percent / 100
+
+        if memory_percent > self._memory_threshold:
+            self._unload_least_used_model()
+
+    def _unload_least_used_model(self):
+        """卸载最少使用的模型"""
+        if not self._last_used:
+            return
+
+        current_time = time.time()
+        least_used_model = min(self._last_used.items(), key=lambda x: x[1])[0]
+        if current_time - self._last_used[least_used_model] > self._max_idle_time:
+            self._unload_model(least_used_model)
+
+    def _unload_model(self, model_type: str):
+        """卸载指定模型"""
+        if model_type in self._models:
+            del self._models[model_type]
+            del self._last_used[model_type]
+            # 强制进行垃圾回收
+            import gc
+            gc.collect()
+            if self.device == 'cuda':
+                torch.cuda.empty_cache()
+
+    def _cleanup_models(self):
+        """定期清理未使用的模型"""
+        while True:
+            time.sleep(60)  # 每分钟检查一次
+            with self._lock:
+                current_time = time.time()
+                models_to_unload = [
+                    model_type for model_type, last_used in self._last_used.items()
+                    if current_time - last_used > self._max_idle_time
+                ]
+                for model_type in models_to_unload:
+                    self._unload_model(model_type)
+
+    def _setup_quantization_backend(self):
+        """设置量化后端"""
+        if self.device == 'cuda':
+            # 在GPU上使用CUDA量化后端
+            torch.backends.quantized.engine = 'fbgemm'
+        else:
+            # 在CPU上使用x86量化后端
+            torch.backends.quantized.engine = 'qnnpack'
+
+    def _prepare_model_for_quantization(self, model, config):
+        """准备模型进行量化"""
+        if not config['enabled']:
+            return model
+
+        if config['method'] == 'dynamic':
+            return self._apply_dynamic_quantization(model, config)
+        elif config['method'] == 'static':
+            return self._apply_static_quantization(model, config)
+        return model
+
+    def _apply_dynamic_quantization(self, model, config):
+        """应用动态量化"""
+        try:
+            print(f"Applying dynamic quantization with dtype {config['dtype']}")
+            model = torch.quantization.quantize_dynamic(
+                model,
+                qconfig_spec={
+                    layer: torch.quantization.default_dynamic_qconfig
+                    for layer in config['layers']
+                },
+                dtype=config['dtype']
+            )
+            print("Dynamic quantization applied successfully")
+            return model
+        except Exception as e:
+            print(f"Dynamic quantization failed: {str(e)}")
+            return model
+
+    def _apply_static_quantization(self, model, config):
+        """应用静态量化"""
+        try:
+            print(f"Applying static quantization")
+            # 准备量化配置
+            model.qconfig = torch.quantization.get_default_qconfig('fbgemm' if self.device == 'cuda' else 'qnnpack')
+            
+            # 融合操作
+            model = torch.quantization.fuse_modules(model, [['conv', 'bn', 'relu']])
+            
+            # 准备量化
+            model = torch.quantization.prepare(model)
+            
+            # 校准（这里需要实际的校准数据）
+            # self._calibrate_model(model, config['calibration_size'])
+            
+            # 转换为量化模型
+            model = torch.quantization.convert(model)
+            
+            print("Static quantization applied successfully")
+            return model
+        except Exception as e:
+            print(f"Static quantization failed: {str(e)}")
+            return model
+
+    def _calibrate_model(self, model, calibration_size):
+        """使用校准数据集校准模型（用于静态量化）"""
+        # 这里应该使用实际的校准数据
+        # 为了示例，我们使用随机数据
+        with torch.no_grad():
+            for _ in range(calibration_size):
+                dummy_input = torch.randn(1, 3, 224, 224)
+                model(dummy_input)
+
+    def _load_spacy(self):
         try:
             return spacy.load('en_core_web_sm')
         except OSError:
             spacy.cli.download('en_core_web_sm')
             return spacy.load('en_core_web_sm')
-    elif model_name == 'classifier':
-        return pipeline("zero-shot-classification", 
-                      device='cuda' if torch.cuda.is_available() else 'cpu',
-                      model='facebook/bart-large-mnli')  # 使用更小的模型
-    elif model_name == 'sentence_transformer':
-        return SentenceTransformer('paraphrase-MiniLM-L6-v2')
 
-def initialize_dependencies():
-    """异步初始化所需的依赖和模型"""
-    global nlp, classifier, sentence_model
-    
-    try:
-        # NLTK数据 - 使用异步方式下载
-        nltk_resources = ['punkt', 'averaged_perceptron_tagger', 'maxent_ne_chunker', 'words', 'stopwords']
-        for resource in nltk_resources:
-            try:
-                nltk.data.find(f'tokenizers/{resource}')
-            except LookupError:
-                nltk.download(resource, quiet=True)
+    def _load_classifier(self):
+        print("Loading classifier model...")
+        model = pipeline("zero-shot-classification",
+                        model='facebook/bart-large-mnli',
+                        device=self.device)
         
-        # 使用线程池并行加载模型
-        future_spacy = executor.submit(load_model_in_thread, 'spacy')
-        future_classifier = executor.submit(load_model_in_thread, 'classifier')
-        future_sentence = executor.submit(load_model_in_thread, 'sentence_transformer')
-        
-        # 等待所有模型加载完成
-        nlp = future_spacy.result()
-        classifier = future_classifier.result()
-        sentence_model = future_sentence.result()
-        
-        print("模型加载完成")
-        print(f"GPU加速: {'可用' if torch.cuda.is_available() else '不可用'}")
-        
-        return True
-    except Exception as e:
-        print(f"初始化失败: {str(e)}")
-        return False
+        if self._model_configs['classifier']['quantize']['enabled']:
+            print("Applying quantization to classifier model")
+            model.model = self._prepare_model_for_quantization(
+                model.model, 
+                self._model_configs['classifier']['quantize']
+            )
+        return model
 
-# 使用缓存装饰器优化文本处理
-@lru_cache(maxsize=100)
-def process_text(text: str) -> str:
-    """处理文本并缓存结果"""
-    doc = nlp(text)
-    return " ".join([token.text for token in doc])
+    def _load_sentence_transformer(self):
+        print("Loading sentence transformer model...")
+        model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
+        model = model.to(self.device)
+        
+        if self._model_configs['sentence_transformer']['quantize']['enabled']:
+            print("Applying quantization to sentence transformer model")
+            model.encoder = self._prepare_model_for_quantization(
+                model.encoder,
+                self._model_configs['sentence_transformer']['quantize']
+            )
+        return model
 
-# 优化图片处理
-def optimize_image(image: Image.Image, max_size: int = 1024) -> Image.Image:
-    """优化图片大小和质量"""
-    if max(image.size) > max_size:
-        ratio = max_size / max(image.size)
-        new_size = tuple(int(dim * ratio) for dim in image.size)
-        image = image.resize(new_size, Image.Resampling.LANCZOS)
-    return image
+    def clear_cache(self, model_type: str = None):
+        with self._lock:
+            if model_type:
+                if model_type in self._models:
+                    del self._models[model_type]
+            else:
+                self._models.clear()
+
+    def get_model_memory_usage(self, model_type: str = None):
+        """获取模型内存使用情况"""
+        if model_type:
+            if model_type in self._models:
+                model = self._models[model_type]
+                return self._get_model_size(model)
+            return None
+        
+        memory_usage = {}
+        for model_type, model in self._models.items():
+            memory_usage[model_type] = self._get_model_size(model)
+        return memory_usage
+
+    def _get_model_size(self, model):
+        """计算模型大小（以MB为单位）"""
+        param_size = 0
+        buffer_size = 0
+        
+        for param in model.parameters():
+            param_size += param.nelement() * param.element_size()
+        
+        for buffer in model.buffers():
+            buffer_size += buffer.nelement() * buffer.element_size()
+            
+        size_mb = (param_size + buffer_size) / 1024 / 1024
+        return round(size_mb, 2)
+
+class ModelContext:
+    """模型使用的上下文管理器"""
+    def __init__(self, model_type: str, manager: 'ModelManager'):
+        self.model_type = model_type
+        self.manager = manager
+        self.model = None
+        self.error = None
+
+    def __enter__(self):
+        try:
+            self.model = self.manager.get_model(self.model_type)
+            return self.model
+        except Exception as e:
+            self.error = e
+            raise ModelError(f"Error loading model {self.model_type}: {str(e)}")
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            # 记录错误但不处理
+            print(f"Error using model {self.model_type}: {str(exc_val)}")
+        return False  # 让异常继续传播
+
+class ModelError(Exception):
+    """模型相关错误的基类"""
+    pass
+
+class ModelLoadError(ModelError):
+    """模型加载错误"""
+    pass
+
+class ModelInferenceError(ModelError):
+    """模型推理错误"""
+    pass
+
+# 创建全局ModelManager实例
+model_manager = ModelManager()
 
 # 服务器初始化
 server = Server("pdf_reader")
@@ -351,39 +615,34 @@ async def extract_tables_from_pdf(file_path: str, page_number: int = None) -> Li
 async def analyze_pdf_content(file_path: str, analysis_type: str) -> Dict[str, Any]:
     """分析PDF内容"""
     try:
-        # 使用pdfminer提取文本，可以处理更复杂的PDF布局
-        text = pdfminer_extract_text(file_path)
+        text = extract_text_from_pdf(file_path)
         
         if analysis_type == "entities":
-            # 使用spaCy进行命名实体识别
-            doc = nlp(text)
-            entities = {}
-            for ent in doc.ents:
-                if ent.label_ not in entities:
-                    entities[ent.label_] = []
-                entities[ent.label_].append(ent.text)
-            return {"entities": entities}
+            with ModelContext('spacy', model_manager) as nlp:
+                doc = nlp(text)
+                entities = [(ent.text, ent.label_) for ent in doc.ents]
+                return {"entities": entities}
             
         elif analysis_type == "summary":
-            # 使用spaCy生成简单摘要（选择重要句子）
-            doc = nlp(text)
-            sentences = [sent.text.strip() for sent in doc.sents]
-            # 简单选择前3个句子作为摘要
-            summary = " ".join(sentences[:3])
-            return {"summary": summary}
+            with ModelContext('classifier', model_manager) as classifier:
+                sentences = nltk.sent_tokenize(text)
+                results = classifier(sentences, 
+                                  candidate_labels=["important", "not important"],
+                                  multi_label=False)
+                important_sentences = [sent for sent, score in zip(sentences, results['scores']) 
+                                    if score > 0.7]
+                return {"summary": " ".join(important_sentences[:5])}
             
         elif analysis_type == "keywords":
-            # 使用NLTK提取关键词
-            tokens = nltk.word_tokenize(text)
-            pos_tags = nltk.pos_tag(tokens)
-            # 选择名词作为关键词
-            keywords = [word for word, pos in pos_tags if pos.startswith('NN')]
-            # 去重并限制数量
-            keywords = list(set(keywords))[:10]
-            return {"keywords": keywords}
+            with ModelContext('spacy', model_manager) as nlp:
+                doc = nlp(text)
+                keywords = [token.text for token in doc if not token.is_stop and token.is_alpha]
+                return {"keywords": list(set(keywords[:20]))}
             
+    except ModelError as e:
+        return {"error": f"Model error: {str(e)}"}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"Unexpected error: {str(e)}"}
 
 async def get_pdf_metadata(file_path: str) -> Dict[str, Any]:
     """获取PDF元数据"""
@@ -405,117 +664,221 @@ async def get_pdf_metadata(file_path: str) -> Dict[str, Any]:
     except Exception as e:
         return {"error": str(e)}
 
-async def classify_document(file_path: str, categories: List[str]) -> Dict[str, float]:
+async def classify_document(file_path: str, categories: List[str]) -> Dict[str, Any]:
     """对文档进行分类"""
     try:
         text = pdfminer_extract_text(file_path)
-        result = classifier(text, categories)
-        return {
-            "labels": result["labels"],
-            "scores": result["scores"]
-        }
+        with ModelContext('classifier', model_manager) as classifier:
+            result = classifier(text, categories)
+            return {
+                "labels": result["labels"],
+                "scores": [float(score) for score in result["scores"]]
+            }
+    except ModelError as e:
+        return {"error": f"Model error: {str(e)}"}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"Unexpected error: {str(e)}"}
 
-async def calculate_similarity(file_path1: str, file_path2: str) -> Dict[str, Any]:
+async def calculate_similarity(file_path1: str, file_path2: str) -> Dict[str, float]:
     """计算两个文档的相似度"""
     try:
         text1 = pdfminer_extract_text(file_path1)
         text2 = pdfminer_extract_text(file_path2)
         
-        # 使用sentence-transformers计算语义相似度
-        embeddings1 = sentence_model.encode(text1, convert_to_tensor=True)
-        embeddings2 = sentence_model.encode(text2, convert_to_tensor=True)
-        
-        similarity = torch.nn.functional.cosine_similarity(embeddings1.unsqueeze(0), 
-                                                         embeddings2.unsqueeze(0))
-        
-        return {
-            "similarity_score": float(similarity),
-            "interpretation": "相似度范围从0（完全不同）到1（完全相同）"
-        }
+        with ModelContext('sentence_transformer', model_manager) as model:
+            # 将文本分成较小的块进行处理
+            def chunk_text(text, chunk_size=1000):
+                return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+            
+            # 计算文本块的嵌入向量
+            def get_embeddings(text):
+                chunks = chunk_text(text)
+                embeddings = model.encode(chunks)
+                return np.mean(embeddings, axis=0)
+            
+            # 计算两个文档的相似度
+            embedding1 = get_embeddings(text1)
+            embedding2 = get_embeddings(text2)
+            similarity = np.dot(embedding1, embedding2) / (np.linalg.norm(embedding1) * np.linalg.norm(embedding2))
+            
+            return {"similarity_score": float(similarity)}
+            
+    except ModelError as e:
+        return {"error": f"Model error: {str(e)}"}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"Unexpected error: {str(e)}"}
 
 async def detect_languages(file_path: str) -> Dict[str, Any]:
     """检测文档中的语言"""
     try:
         text = pdfminer_extract_text(file_path)
-        
-        # 将文本分成段落
-        paragraphs = text.split('\n\n')
-        
-        # 对每个段落进行语言检测
-        language_stats = defaultdict(int)
-        total_paragraphs = len(paragraphs)
-        
-        for para in paragraphs:
-            if para.strip():
+        with ModelContext('spacy', model_manager) as nlp:
+            # 将文本分成段落
+            paragraphs = text.split('\n\n')
+            language_info = []
+            
+            for para in paragraphs:
+                if not para.strip():
+                    continue
+                    
                 try:
                     lang = detect(para)
-                    language_stats[lang] += 1
-                except:
+                    doc = nlp(para)
+                    # 获取段落的语言特征
+                    features = {
+                        'text': para[:100] + '...' if len(para) > 100 else para,
+                        'language': lang,
+                        'tokens': len(doc),
+                        'sentences': len(list(doc.sents))
+                    }
+                    language_info.append(features)
+                except Exception as e:
+                    print(f"Error processing paragraph: {str(e)}")
                     continue
-        
-        # 计算每种语言的比例
-        language_distribution = {
-            lang: count/total_paragraphs 
-            for lang, count in language_stats.items()
-        }
-        
-        return {
-            "primary_language": max(language_stats.items(), key=lambda x: x[1])[0],
-            "language_distribution": language_distribution
-        }
+            
+            return {
+                "language_analysis": language_info,
+                "document_stats": {
+                    "total_paragraphs": len(paragraphs),
+                    "processed_paragraphs": len(language_info)
+                }
+            }
+            
+    except ModelError as e:
+        return {"error": f"Model error: {str(e)}"}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"Unexpected error: {str(e)}"}
 
 async def advanced_text_analysis(file_path: str) -> Dict[str, Any]:
     """执行高级文本分析"""
     try:
         text = pdfminer_extract_text(file_path)
-        doc = nlp(text)
         
-        # 1. 复杂度分析
-        sentences = list(doc.sents)
-        avg_sentence_length = sum(len(sent) for sent in sentences) / len(sentences)
-        
-        # 2. 词性分布
-        pos_dist = defaultdict(int)
-        for token in doc:
-            pos_dist[token.pos_] += 1
-        
-        # 3. 依存关系分析
-        dep_dist = defaultdict(int)
-        for token in doc:
-            dep_dist[token.dep_] += 1
-        
-        # 4. 主题建模（使用TF-IDF找出最重要的词组）
-        vectorizer = TfidfVectorizer(max_features=10)
-        tfidf_matrix = vectorizer.fit_transform([text])
-        feature_names = vectorizer.get_feature_names_out()
-        scores = tfidf_matrix.toarray()[0]
-        important_phrases = [
-            (phrase, score) 
-            for phrase, score in zip(feature_names, scores)
-        ]
-        important_phrases.sort(key=lambda x: x[1], reverse=True)
-        
-        return {
-            "complexity_metrics": {
-                "avg_sentence_length": avg_sentence_length,
-                "vocabulary_size": len(set(token.text.lower() for token in doc)),
-                "readability_score": avg_sentence_length * 0.39 + 11.8  # 简化的可读性评分
-            },
-            "pos_distribution": dict(pos_dist),
-            "dependency_patterns": dict(dep_dist),
-            "important_phrases": [
+        with ModelContext('spacy', model_manager) as nlp:
+            doc = nlp(text)
+            
+            # 1. 复杂度分析
+            sentences = list(doc.sents)
+            avg_sentence_length = sum(len(sent) for sent in sentences) / len(sentences)
+            
+            # 2. 词性分布
+            pos_dist = defaultdict(int)
+            for token in doc:
+                pos_dist[token.pos_] += 1
+            
+            # 3. 依存关系分析
+            dep_dist = defaultdict(int)
+            for token in doc:
+                dep_dist[token.dep_] += 1
+            
+            # 4. 主题建模（使用TF-IDF找出最重要的词组）
+            vectorizer = TfidfVectorizer(max_features=10)
+            tfidf_matrix = vectorizer.fit_transform([text])
+            feature_names = vectorizer.get_feature_names_out()
+            scores = tfidf_matrix.toarray()[0]
+            important_phrases = [
                 {"phrase": phrase, "importance": float(score)} 
-                for phrase, score in important_phrases[:10]
+                for phrase, score in zip(feature_names, scores)
             ]
-        }
+            
+            return {
+                "complexity_metrics": {
+                    "avg_sentence_length": float(avg_sentence_length),
+                    "vocabulary_size": len(set(token.text.lower() for token in doc)),
+                    "readability_score": float(avg_sentence_length * 0.39 + 11.8)
+                },
+                "pos_distribution": dict(pos_dist),
+                "dependency_patterns": dict(dep_dist),
+                "important_phrases": sorted(important_phrases, 
+                                         key=lambda x: x["importance"], 
+                                         reverse=True)[:10]
+            }
+            
+    except ModelError as e:
+        return {"error": f"Model error: {str(e)}"}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"Unexpected error: {str(e)}"}
+
+@lru_cache(maxsize=100)
+def process_text(text: str) -> str:
+    """处理文本并缓存结果"""
+    try:
+        with ModelContext('spacy', model_manager) as nlp:
+            doc = nlp(text)
+            return " ".join([token.text for token in doc])
+    except ModelError as e:
+        print(f"Error processing text: {str(e)}")
+        return text  # 返回原始文本作为后备方案
+    except Exception as e:
+        print(f"Unexpected error processing text: {str(e)}")
+        return text
+
+async def main():
+    """运行服务器"""
+    try:
+        print("PDF Reader MCP 服务启动中...")
+        
+        # 在后台线程中初始化依赖
+        init_thread = threading.Thread(target=initialize_dependencies)
+        init_thread.start()
+        
+        # 启动服务器
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="pdf_reader",
+                    server_version="0.1.0",
+                    capabilities=server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={},
+                    ),
+                ),
+            )
+    except Exception as e:
+        print(f"服务器运行错误: {str(e)}")
+        raise
+
+def initialize_dependencies():
+    """异步初始化所需的依赖"""
+    try:
+        # NLTK数据 - 使用异步方式下载
+        nltk_resources = ['punkt', 'averaged_perceptron_tagger', 'maxent_ne_chunker', 'words', 'stopwords']
+        for resource in nltk_resources:
+            try:
+                nltk.data.find(f'tokenizers/{resource}')
+            except LookupError:
+                nltk.download(resource, quiet=True)
+        
+        print("NLTK resources loaded")
+        print(f"GPU acceleration: {'available' if torch.cuda.is_available() else 'not available'}")
+        
+        return True
+    except Exception as e:
+        print(f"Initialization failed: {str(e)}")
+        return False
+
+# 优化图片处理
+def optimize_image(image: Image.Image, max_size: int = 1024) -> Image.Image:
+    """优化图片大小和质量"""
+    if max(image.size) > max_size:
+        ratio = max_size / max(image.size)
+        new_size = tuple(int(dim * ratio) for dim in image.size)
+        image = image.resize(new_size, Image.Resampling.LANCZOS)
+    return image
+
+if __name__ == "__main__":
+    # 设置torch使用的线程数
+    torch.set_num_threads(4)
+    
+    # 确保在主模块中运行
+    import sys
+    if 'src.pdf_reader.server' in sys.modules:
+        del sys.modules['src.pdf_reader.server']
+    
+    # 初始化并运行服务器
+    asyncio.run(main())
 
 @server.call_tool()
 async def handle_call_tool(
@@ -655,34 +1018,3 @@ async def handle_call_tool(
     
     else:
         raise ValueError(f"未知的工具: {name}")
-
-async def main():
-    """运行服务器"""
-    try:
-        print("PDF Reader MCP 服务启动中...")
-        
-        # 在后台线程中初始化依赖
-        init_thread = threading.Thread(target=initialize_dependencies)
-        init_thread.start()
-        
-        # 启动服务器
-        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-            await server.run(
-                read_stream,
-                write_stream,
-                InitializationOptions(
-                    server_name="pdf_reader",
-                    server_version="0.1.0",
-                    capabilities=server.get_capabilities(
-                        notification_options=NotificationOptions(),
-                        experimental_capabilities={},
-                    ),
-                ),
-            )
-    except Exception as e:
-        print(f"服务器运行错误: {str(e)}")
-        raise
-
-if __name__ == "__main__":
-    # 设置torch使用的线程数
-    torch.set_num_threads(4)

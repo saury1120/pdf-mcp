@@ -56,7 +56,10 @@
             ]
         }
     }
-}   ```
+}
+
+
+ ```
 
 
 # PDF-MCP Service
@@ -112,7 +115,7 @@ A high-performance PDF document processing service supporting text, image, table
     }
 }
 
-
+```
 ## 📄 License
 
 MIT License - see the LICENSE file for details.

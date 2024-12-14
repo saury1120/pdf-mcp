@@ -57,8 +57,6 @@
         }
     }
 }
-
-
  ```
 
 
@@ -97,9 +95,9 @@ A high-performance PDF document processing service supporting text, image, table
    ```bash
    uv run pdf_reader
 
-```
-### Claude Desktop 
-json
+
+## Claude Desktop 
+```json
 {
     "mcpServers": {
         "pdf_reader": {
@@ -113,8 +111,8 @@ json
         }
     }
 }
-
 ```
+
 ## 📄 License
 
 MIT License - see the LICENSE file for details.

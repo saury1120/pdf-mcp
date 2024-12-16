@@ -187,8 +187,8 @@ class ModelManager:
             # 在GPU上使用CUDA量化后端
             torch.backends.quantized.engine = 'fbgemm'
         else:
-            # 在CPU上使用x86量化后端
-            torch.backends.quantized.engine = 'qnnpack'
+            # 在CPU上使用fbgemm (Windows compatible)
+            torch.backends.quantized.engine = 'fbgemm'
 
     def _prepare_model_for_quantization(self, model, config):
         """准备模型进行量化"""
@@ -224,7 +224,7 @@ class ModelManager:
         try:
             print(f"Applying static quantization")
             # 准备量化配置
-            model.qconfig = torch.quantization.get_default_qconfig('fbgemm' if self.device == 'cuda' else 'qnnpack')
+            model.qconfig = torch.quantization.get_default_qconfig('fbgemm' if self.device == 'cuda' else 'fbgemm')
             
             # 融合操作
             model = torch.quantization.fuse_modules(model, [['conv', 'bn', 'relu']])

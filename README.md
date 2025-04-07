@@ -1,4 +1,4 @@
-# PDF-MCP
+# PDF-MCP ![GitHub stars](https://img.shields.io/github/stars/saury1120/pdf-mcp.svg?style=social&label=Star)
 
 [中文](#pdf-mcp-服务) | [English](#pdf-mcp-service)
 
@@ -112,10 +112,3 @@ A high-performance PDF document processing service supporting text, image, table
     }
 }
 ```
-
-## Star History
-[![Stargazers over time](https://starchart.cc/saury1120/pdf-mcp.svg)](https://starchart.cc/saury1120/pdf-mcp)
-![GitHub stars](https://img.shields.io/github/stars/saury1120/pdf-mcp.svg?style=social&label=Star)
-## 📄 License
-
-MIT License - see the LICENSE file for details.

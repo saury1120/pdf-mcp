@@ -113,6 +113,12 @@ A high-performance PDF document processing service supporting text, image, table
 }
 ```
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=saury1120/pdf-mcp&type=Date)](https://star-history.com/#saury1120/pdf-mcp&Date)
+
+
+
 ## 📄 License
 
 MIT License - see the LICENSE file for details.

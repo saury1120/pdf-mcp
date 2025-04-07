@@ -116,7 +116,7 @@ A high-performance PDF document processing service supporting text, image, table
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=saury1120/pdf-mcp&type=Date)](https://star-history.com/#saury1120/pdf-mcp&Date)
-
+[![Star History Chart](https://star-history.com/embed?repos=saury1120/pdf-mcp&type=Line)](https://star-history.com/#saury1120/pdf-mcp&Date)
 
 
 ## 📄 License

@@ -115,8 +115,7 @@ A high-performance PDF document processing service supporting text, image, table
 
 ## Star History
 [![Stargazers over time](https://starchart.cc/saury1120/pdf-mcp.svg)](https://starchart.cc/saury1120/pdf-mcp)
-[![Star History Chart](https://star-history.com/embed?repos=saury1120/pdf-mcp&type=Line)](https://star-history.com/#saury1120/pdf-mcp&Date)
-
+![GitHub stars](https://img.shields.io/github/stars/saury1120/pdf-mcp.svg?style=social&label=Star)
 ## 📄 License
 
 MIT License - see the LICENSE file for details.
